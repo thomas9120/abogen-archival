@@ -153,7 +153,10 @@ def _process_karaoke_highlighting(
                         if t.get("end") is not None and t.get("start") is not None
                         else 0.5
                     )
-                    duration_cs = int(duration * 100)
+                    try:
+                        duration_cs = int(duration * 100)
+                    except (ValueError, OverflowError, TypeError):
+                        duration_cs = 50
                     # Add karaoke effect
                     karaoke_text += f"{{\\kf{duration_cs}}}{t.get('text', '')}{t.get('whitespace', '') or ''}"
 
@@ -174,7 +177,10 @@ def _process_karaoke_highlighting(
         karaoke_text = ""
         for t in current_sentence:
             duration = t["end"] - t["start"] if t.get("end") and t.get("start") else 0.5
-            duration_cs = int(duration * 100)
+            try:
+                duration_cs = int(duration * 100)
+            except (ValueError, OverflowError, TypeError):
+                duration_cs = 50
             karaoke_text += f"{{\\kf{duration_cs}}}{t.get('text', '')}{t.get('whitespace', '') or ''}"
         text_stripped = karaoke_text.strip()
         if text_stripped:
@@ -230,6 +236,19 @@ def _process_spacy_sentences(
             set(sentence_boundaries + comma_positions)
         )
 
+    # spaCy does not treat ellipsis ("...", "..", "…") as a sentence
+    # boundary ("Lorem ipsum... Lorem..." stays one sentence), so ellipsis
+    # runs followed by whitespace/end would merge into a single subtitle
+    # entry. Add explicit boundaries after them. Single dots ("Mr.") stay
+    # spaCy's responsibility so abbreviations don't regress.
+    for m in re.finditer(r"\.{2,}(?=[\s\"'”’»›)\]}]|$)|…(?=[\s\"'”’»›)\]}]|$)", full_text):
+        sentence_boundaries.append(m.end())
+    # Double newlines are paragraph breaks: always split, even when spaCy
+    # sees no sentence boundary.
+    for m in re.finditer(r"\n{2,}", full_text):
+        sentence_boundaries.append(m.end())
+    sentence_boundaries = sorted(set(sentence_boundaries))
+
     # Multi-sentence single FakeToken handling
     if len(tokens) == 1 and len(sentence_boundaries) > 1:
         single = tokens[0]
@@ -257,7 +276,12 @@ def _process_spacy_sentences(
         if prev_pos < len(full_text):
             remainder = full_text[prev_pos:].strip()
             if remainder:
-                subtitle_entries.append((cur_start, end_time, remainder))
+                remainder_end = end_time
+                if remainder_end is None:
+                    remainder_end = fallback_end_time
+                if remainder_end is None:
+                    remainder_end = cur_start
+                subtitle_entries.append((cur_start, remainder_end, remainder))
 
         _apply_fallback_end_time(subtitle_entries, fallback_end_time)
         return
@@ -379,15 +403,24 @@ def _process_regex_sentences(
             if len(parts) > 1:
                 d = (end_time - start_time) if (end_time is not None and start_time is not None and end_time > start_time) else 0.0
                 total_len = max(len(sentence_text), 1)
-                cur_s = start_time
+                cur_s = start_time if start_time is not None else 0.0
                 for i, p in enumerate(parts):
-                    e = end_time if i == len(parts) - 1 else cur_s + d * len(p) / total_len
+                    if i == len(parts) - 1 and end_time is not None:
+                        e = end_time
+                    else:
+                        e = cur_s + d * len(p) / total_len
                     subtitle_entries.append((cur_s, e, p))
                     cur_s = e
                 current_sentence = []
 
         if current_sentence and sentence_text:
-            subtitle_entries.append((start_time, end_time, sentence_text))
+            safe_start = start_time if start_time is not None else 0.0
+            safe_end = end_time
+            if safe_end is None:
+                safe_end = fallback_end_time
+            if safe_end is None:
+                safe_end = safe_start
+            subtitle_entries.append((safe_start, safe_end, sentence_text))
 
     # Fallback for last entry
     _apply_fallback_end_time(subtitle_entries, fallback_end_time)

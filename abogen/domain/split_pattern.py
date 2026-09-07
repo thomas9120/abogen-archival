@@ -5,10 +5,10 @@ from __future__ import annotations
 from abogen.domain.enums import Language, SubtitleMode
 
 # Canonical punctuation sets covering all supported scripts:
-# ASCII (. ! ?), Arabic ؟, CJK (。！？), Devanagari ।
-PUNCTUATION_SENTENCE = r".!?؟。！？।"
+# ASCII (. ! ?), ellipsis (…), Arabic ؟, CJK (。！？), Devanagari ।
+PUNCTUATION_SENTENCE = r".!?…؟。！？।"
 # Commas: ASCII , CJK fullwidth ，CJK ideographic 、
-PUNCTUATION_SENTENCE_COMMA = r".!?,？。！？،，、।"
+PUNCTUATION_SENTENCE_COMMA = r".!?…,？。！？،，、।"
 PUNCTUATION_COMMAS = ",，、"
 
 

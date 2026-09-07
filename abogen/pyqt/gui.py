@@ -137,6 +137,28 @@ class ThreadSafeLogSignal(QObject):
         self.log_signal.emit(message)
 
 
+_UPDATE_CHECK_URL = "https://raw.githubusercontent.com/denizsafak/abogen/refs/heads/main/abogen/VERSION"
+_UPDATE_CHECK_TIMEOUT = 8  # seconds; bounds offline/DNS hangs so the GUI never blocks
+
+
+class _UpdateCheckThread(QThread):
+    """Fetch the remote VERSION file off the GUI thread."""
+
+    succeeded = pyqtSignal(str)
+    failed = pyqtSignal(str)
+
+    def run(self):
+        import urllib.request
+
+        try:
+            with urllib.request.urlopen(
+                _UPDATE_CHECK_URL, timeout=_UPDATE_CHECK_TIMEOUT
+            ) as response:
+                self.succeeded.emit(response.read().decode().strip())
+        except Exception as exc:  # offline, DNS hang, HTTP error, ...
+            self.failed.emit(str(exc))
+
+
 class IconProvider(QFileIconProvider):
     def icon(self, fileInfo):
         return super().icon(fileInfo)
@@ -4077,75 +4099,85 @@ Categories=AudioVideo;Audio;Utility;
         self.check_for_updates_startup()
 
     def check_for_updates_startup(self):
-        import urllib.request
-
-        def show_update_message(remote_version, local_version):
-            msg_box = QMessageBox(self)
-            msg_box.setIcon(QMessageBox.Icon.Information)
-            msg_box.setWindowTitle("Update Available")
-            msg_box.setText(
-                f"A new version of {PROGRAM_NAME} is available! ({local_version} > {remote_version})"
-            )
-            msg_box.setInformativeText(
-                f"If you installed via pip, update by running:\n"
-                f"pip install --upgrade {PROGRAM_NAME}\n\n"
-                f"If you're using the Windows portable version, run 'WINDOWS_INSTALL.bat' again.\n\n"
-                "Alternatively, visit the GitHub repository for more information. "
-                "Would you like to view the changelog?"
-            )
-            msg_box.setStandardButtons(
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-            )
-            msg_box.setDefaultButton(QMessageBox.StandardButton.Yes)
-            if msg_box.exec() == QMessageBox.StandardButton.Yes:
-                try:
-                    QDesktopServices.openUrl(QUrl(GITHUB_URL + "/releases/latest"))
-                except Exception:
-                    pass
-
-        # Reset flag to track if we should show "no updates" message
+        # Network I/O runs in a worker thread: urlopen without a timeout on
+        # the GUI thread froze the whole app when offline (DNS/connect can
+        # hang for minutes). Results return via signals on the GUI thread.
+        thread = getattr(self, "_update_check_thread", None)
+        if thread is not None:
+            try:
+                if thread.isRunning():
+                    return
+            except RuntimeError:
+                pass  # previous thread already finished/deleted
         show_result = (
             hasattr(self, "_show_update_check_result")
             and self._show_update_check_result
         )
         self._show_update_check_result = False
+        self._update_check_thread = _UpdateCheckThread(self)
+        self._update_check_thread.succeeded.connect(
+            lambda remote_raw: self._on_update_check_done(remote_raw, show_result)
+        )
+        self._update_check_thread.failed.connect(
+            lambda err: self._on_update_check_failed(err, show_result)
+        )
+        self._update_check_thread.finished.connect(
+            self._update_check_thread.deleteLater
+        )
+        self._update_check_thread.start()
 
+    def _on_update_check_done(self, remote_raw, show_result):
+        remote_version = remote_raw.strip()
+        local_version = VERSION
         try:
-            update_url = "https://raw.githubusercontent.com/denizsafak/abogen/refs/heads/main/abogen/VERSION"
-            with urllib.request.urlopen(update_url) as response:
-                remote_raw = response.read().decode().strip()
-            local_raw = VERSION
+            remote_num = int("".join(remote_version.split(".")))
+            local_num = int("".join(local_version.split(".")))
+        except ValueError:
+            return
+        if remote_num > local_num:
+            # Use QTimer to ensure UI is ready, then show update message.
+            QTimer.singleShot(
+                1000,
+                lambda: self._show_update_message(remote_version, local_version),
+            )
+        elif show_result:
+            QMessageBox.information(
+                self,
+                "Up to Date",
+                f"You are running the latest version of {PROGRAM_NAME} ({local_version}).",
+            )
 
-            # Parse version numbers
-            remote_version = remote_raw
-            local_version = local_raw
+    def _on_update_check_failed(self, err, show_result):
+        if show_result:
+            QMessageBox.warning(
+                self,
+                "Update Check Failed",
+                f"Could not check for updates:\n{err}",
+            )
 
+    def _show_update_message(self, remote_version, local_version):
+        msg_box = QMessageBox(self)
+        msg_box.setIcon(QMessageBox.Icon.Information)
+        msg_box.setWindowTitle("Update Available")
+        msg_box.setText(
+            f"A new version of {PROGRAM_NAME} is available! ({local_version} > {remote_version})"
+        )
+        msg_box.setInformativeText(
+            f"If you installed via pip, update by running:\n"
+            f"pip install --upgrade {PROGRAM_NAME}\n\n"
+            f"If you're using the Windows portable version, run 'WINDOWS_INSTALL.bat' again.\n\n"
+            "Alternatively, visit the GitHub repository for more information. "
+            "Would you like to view the changelog?"
+        )
+        msg_box.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        msg_box.setDefaultButton(QMessageBox.StandardButton.Yes)
+        if msg_box.exec() == QMessageBox.StandardButton.Yes:
             try:
-                remote_num = int("".join(remote_version.split(".")))
-                local_num = int("".join(local_version.split(".")))
-            except ValueError as ve:
-                return
-
-            if remote_num > local_num:
-                # Use QTimer to ensure UI is ready, then show update message.
-                QTimer.singleShot(
-                    1000, lambda: show_update_message(remote_version, local_version)
-                )
-            elif show_result:
-                # Show "no updates" message if manually checking
-                QMessageBox.information(
-                    self,
-                    "Up to Date",
-                    f"You are running the latest version of {PROGRAM_NAME} ({local_version}).",
-                )
-        except Exception as e:
-            if show_result:
-                QMessageBox.warning(
-                    self,
-                    "Update Check Failed",
-                    f"Could not check for updates:\n{str(e)}",
-                )
-            pass
+                QDesktopServices.openUrl(QUrl(GITHUB_URL + "/releases/latest"))
+            except Exception:
+                pass
 
     def clear_cache_files(self):
         """Clear cache files created by the program."""
@@ -4248,8 +4280,6 @@ Categories=AudioVideo;Audio;Utility;
 
     def set_max_log_lines(self):
         """Open a dialog to set the maximum lines in the log window."""
-        from PyQt6.QtWidgets import QInputDialog
-
         value, ok = QInputDialog.getInt(
             self,
             "Max Lines in Log Window",
@@ -4271,8 +4301,6 @@ Categories=AudioVideo;Audio;Utility;
 
     def set_max_subtitle_words(self):
         """Open a dialog to set the maximum words per subtitle"""
-        from PyQt6.QtWidgets import QInputDialog
-
         current_value = self.config.get("max_subtitle_words", _DEFAULTS["max_subtitle_words"])
 
         value, ok = QInputDialog.getInt(

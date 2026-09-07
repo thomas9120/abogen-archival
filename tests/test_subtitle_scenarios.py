@@ -344,3 +344,59 @@ class TestComplexParagraphsAndEdgeCases:
         assert len(entries) == 2
         assert entries[0][2] == '"I wonder..."'
         assert entries[1][2] == "he mused."
+
+
+class TestEllipsisAndParagraphBreaks:
+    """Regression: '...' sentences merged into one entry; '\\n\\n' flattened.
+
+    spaCy does not treat ellipsis as a sentence boundary, so
+    'Lorem ipsum... Lorem...' stayed a single subtitle entry. And
+    _cleanup_spacing collapsed paragraph breaks before TTS.
+    """
+
+    @staticmethod
+    def _tok(text_ws, dur=0.5):
+        toks, t = [], 0.0
+        for text, ws in text_ws:
+            toks.append({"start": t, "end": t + dur, "text": text, "whitespace": ws})
+            t += dur
+        return toks, t
+
+    def test_spacy_splits_ellipsis_sentences(self):
+        # Kokoro-style tokens: '...' arrives as 3 dot tokens.
+        toks, end = self._tok([
+            ("Test", ""), (".", " "), ("Lorem", " "), ("ipsum", ""),
+            (".", ""), (".", ""), (".", " "),
+            ("Lorem", ""), (".", ""), (".", ""), (".", ""),
+        ])
+        entries = []
+        process_subtitle_tokens(
+            toks, entries, max_subtitle_words=50, subtitle_mode="Sentence",
+            language=Language.EN_US, use_spacy_segmentation=True,
+            fallback_end_time=end,
+        )
+        assert [e[2] for e in entries] == ["Test.", "Lorem ipsum...", "Lorem..."]
+
+    def test_spacy_keeps_abbreviations_intact(self):
+        toks, end = self._tok([
+            ("Mr.", " "), ("Smith", " "), ("went", " "), ("home", ""),
+            (".", " "), ("He", " "), ("slept", ""), (".", ""),
+        ])
+        entries = []
+        process_subtitle_tokens(
+            toks, entries, max_subtitle_words=50, subtitle_mode="Sentence",
+            language=Language.EN_US, use_spacy_segmentation=True,
+            fallback_end_time=end,
+        )
+        assert [e[2] for e in entries] == ["Mr. Smith went home.", "He slept."]
+
+    def test_spacy_splits_faketoken_ellipsis(self):
+        entries = []
+        process_subtitle_tokens(
+            [{"start": 0.0, "end": 3.0,
+              "text": "Lorem ipsum... Lorem... Lorem...", "whitespace": ""}],
+            entries, max_subtitle_words=50, subtitle_mode="Sentence",
+            language=Language.EN_US, use_spacy_segmentation=True,
+            fallback_end_time=3.0,
+        )
+        assert [e[2] for e in entries] == ["Lorem ipsum...", "Lorem...", "Lorem..."]

@@ -704,7 +704,9 @@ def _cleanup_spacing(text: str) -> str:
     text = re.sub(rf"\s+([\"\'])([\s{_STANDARD_PUNCT_CLASS}{_CLOSING_PUNCT_CLASS}]|$)", r"\1\2", text)
 
     # Ensure spaces exist after sentence punctuation when followed by a word/quote.
-    text = re.sub(rf"([{_STANDARD_PUNCT_CLASS}])(?![\s{_CLOSING_PUNCT_CLASS}\"\'”’»›)])", r"\1 ", text)
+    # Runs of punctuation ("...", "?!?", "!!") must stay together: no space
+    # inside the run, only after it ("a...b" -> "a... b").
+    text = re.sub(rf"([{_STANDARD_PUNCT_CLASS}])(?![\s{_STANDARD_PUNCT_CLASS}{_CLOSING_PUNCT_CLASS}\"\'”’»›)])", r"\1 ", text)
     # Ensure space after unambiguous closing quote when followed by a word (e.g. '”Next' -> '” Next')
     text = re.sub(rf"([{_CLOSING_PUNCT_CLASS}])(?![\s{_STANDARD_PUNCT_CLASS}{_CLOSING_PUNCT_CLASS}\"\'”’»›)])", r"\1 ", text)
     # Straight double quote closing (preceded by non-whitespace) followed directly by a word/number/opening
@@ -715,8 +717,10 @@ def _cleanup_spacing(text: str) -> str:
     # Tighten hyphen/em dash spacing between word characters.
     text = re.sub(r"(?<=\w)\s*([-–—])\s*(?=\w)", r"\1", text)
 
-    # Normalize multiple spaces.
-    text = re.sub(r"\s{2,}", " ", text)
+    # Normalize multiple spaces, preserving paragraph breaks (double
+    # newlines must survive so the TTS engine can split on them).
+    text = re.sub(r"[^\S\n]{2,}", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
 
@@ -1856,7 +1860,10 @@ def _normalize_grouped_numbers(text: str, cfg: ApostropheConfig) -> str:
         for digit in trimmed_fraction:
             if not digit.isdigit():
                 return token
-            digit_words.append(_DIGIT_WORDS[int(digit)])
+            try:
+                digit_words.append(_DIGIT_WORDS[int(digit)])
+            except (ValueError, IndexError):
+                return token
 
         spoken = f"{integer_words} point {' '.join(digit_words)}"
         return f"minus {spoken}" if is_negative else spoken
@@ -1878,18 +1885,27 @@ def _normalize_grouped_numbers(text: str, cfg: ApostropheConfig) -> str:
             # Magnitude case: $2.5 million -> two point five million dollars
             if "." in amount_str:
                 integer_part, fraction_part = amount_str.split(".", 1)
-                integer_val = int(integer_part)
+                try:
+                    integer_val = int(integer_part)
+                except ValueError:
+                    return match.group(0)
                 integer_words = _int_to_words(integer_val, language)
 
                 # Spell out fraction digits
                 digit_words = []
                 for digit in fraction_part:
                     if digit.isdigit():
-                        digit_words.append(_DIGIT_WORDS[int(digit)])
+                        try:
+                            digit_words.append(_DIGIT_WORDS[int(digit)])
+                        except (ValueError, IndexError):
+                            return match.group(0)
 
                 amount_spoken = f"{integer_words} point {' '.join(digit_words)}"
             else:
-                amount_spoken = _int_to_words(int(amount), language)
+                try:
+                    amount_spoken = _int_to_words(int(amount), language)
+                except (ValueError, OverflowError):
+                    return match.group(0)
 
             currency_names = {
                 "$": "dollars",
